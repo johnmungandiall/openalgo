@@ -111,6 +111,48 @@ def download_csv_kotak_data(output_path):
             response = client.get(url, timeout=30)
             # Check if the request was successful
             if response.status_code == 200:
+                # Check for holiday stub files (< 5KB for NSE_FO)
+                file_size = len(response.content)
+                if key == "NSE_FO" and file_size < 5000:
+                    logger.warning(
+                        f"NSE_FO file is only {file_size} bytes - likely a holiday stub file"
+                    )
+                    logger.info("Attempting to download from previous trading days...")
+
+                    # Try previous 5 trading days
+                    from datetime import datetime, timedelta
+
+                    success = False
+                    for days_back in range(1, 6):
+                        try:
+                            past_date = datetime.now() - timedelta(days=days_back)
+                            past_date_str = past_date.strftime("%Y-%m-%d")
+                            fallback_url = url.replace(
+                                datetime.now().strftime("%Y-%m-%d"), past_date_str
+                            )
+                            logger.info(f"Trying {past_date_str}: {fallback_url}")
+
+                            fallback_response = client.get(fallback_url, timeout=30)
+                            if (
+                                fallback_response.status_code == 200
+                                and len(fallback_response.content) >= 5000
+                            ):
+                                logger.info(
+                                    f"✅ Found valid file from {past_date_str} ({len(fallback_response.content)} bytes)"
+                                )
+                                response = fallback_response
+                                success = True
+                                break
+                        except Exception as e:
+                            logger.debug(f"Failed to fetch from {past_date_str}: {e}")
+                            continue
+
+                    if not success:
+                        logger.error(
+                            f"Could not find valid NSE_FO file in last 5 days - skipping"
+                        )
+                        continue
+
                 # Construct the full output path for the file
                 file_path = f"{output_path}/{key}.csv"
                 # Write the content to the file
@@ -557,10 +599,10 @@ def master_contract_download():
         if not downloaded_files:
             raise Exception("No CSV files were downloaded successfully")
 
-        # Clear existing data
-        delete_symtoken_table()
+        # Minimum records validation threshold
+        MIN_RECORDS = 1000
 
-        # Process each exchange if the file exists
+        # Process each exchange if the file exists and collect dataframes
         processors = [
             ("NSE_CM.csv", process_kotak_nse_csv, "NSE Cash"),
             ("NSE_FO.csv", process_kotak_nfo_csv, "NSE F&O"),
@@ -570,7 +612,10 @@ def master_contract_download():
             ("BSE_FO.csv", process_kotak_bfo_csv, "BSE F&O"),
         ]
 
+        parsed_frames = []
         total_records = 0
+
+        # First pass: parse all CSVs and validate
         for filename, processor_func, exchange_name in processors:
             file_path = f"{output_path}/{filename}"
             if os.path.exists(file_path):
@@ -578,15 +623,35 @@ def master_contract_download():
                     logger.info(f"Processing {exchange_name} data...")
                     token_df = processor_func(output_path)
                     if not token_df.empty:
-                        copy_from_dataframe(token_df)
+                        parsed_frames.append((token_df, exchange_name))
                         total_records += len(token_df)
-                        logger.info(f"Processed {len(token_df)} records for {exchange_name}")
+                        logger.info(f"Parsed {len(token_df)} records for {exchange_name}")
                     else:
                         logger.warning(f"No data found in {exchange_name} file")
                 except Exception as e:
                     logger.error(f"Error processing {exchange_name}: {e}")
             else:
                 logger.warning(f"File not found: {filename}")
+
+        # Validate total records before modifying database
+        if total_records < MIN_RECORDS:
+            raise Exception(
+                f"Validation failed: Only {total_records} records parsed (minimum: {MIN_RECORDS}). "
+                "Aborting to prevent data loss."
+            )
+
+        logger.info(f"✅ Validation passed: {total_records} records parsed")
+
+        # Clear existing data only after validation passes
+        delete_symtoken_table()
+
+        # Second pass: insert validated data into database
+        for token_df, exchange_name in parsed_frames:
+            try:
+                copy_from_dataframe(token_df)
+                logger.info(f"Inserted {len(token_df)} records for {exchange_name}")
+            except Exception as e:
+                logger.error(f"Error inserting {exchange_name}: {e}")
 
         # Clean up temporary files
         delete_kotak_temp_data(output_path)

@@ -17,22 +17,24 @@ def map_order_data(order_data):
     Returns:
     - The modified order_data with updated 'tradingsymbol' and 'product' fields.
     """
-    # Check if 'data' is None
-    # if order_data has key 'data' and its value is None
+    # Check if order_data is None or not a dictionary
+    if order_data is None or not isinstance(order_data, dict):
+        logger.info("Invalid order data received.")
+        return {}
 
-    if order_data["stat"] == "Not_Ok":
+    if order_data.get("stat") == "Not_Ok":
         logger.info("No data available.")
-        order_data = {}  # or set it to an empty list if it's supposed to be a list
-        return order_data
+        return {}
 
-    if order_data["data"] is None:
+    data = order_data.get("data")
+    if data is None:
         # Handle the case where there is no data
         # For example, you might want to display a message to the user
         # or pass an empty list or dictionary to the template.
         logger.info("No data available.")
         order_data = {}  # or set it to an empty list if it's supposed to be a list
     else:
-        order_data = order_data["data"]
+        order_data = data
 
     if order_data:
         for order in order_data:
@@ -162,19 +164,24 @@ def map_trade_data(trade_data):
     Returns:
     - The modified order_data with updated 'tradingsymbol' and 'product' fields.
     """
-    if trade_data["stat"] == "Not_Ok":
+    # Check if trade_data is None or not a dictionary
+    if trade_data is None or not isinstance(trade_data, dict):
+        logger.info("Invalid trade data received.")
+        return {}
+
+    if trade_data.get("stat") == "Not_Ok":
         logger.info("No data available.")
-        trade_data = {}  # or set it to an empty list if it's supposed to be a list
-        return trade_data
-        # Check if 'data' is None
-    if trade_data["data"] is None:
+        return {}
+
+    data = trade_data.get("data")
+    if data is None:
         # Handle the case where there is no data
         # For example, you might want to display a message to the user
         # or pass an empty list or dictionary to the template.
         logger.info("No data available.")
         trade_data = {}  # or set it to an empty list if it's supposed to be a list
     else:
-        trade_data = trade_data["data"]
+        trade_data = data
 
     if trade_data:
         for order in trade_data:

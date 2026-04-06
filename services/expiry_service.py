@@ -133,6 +133,25 @@ def get_expiry_dates(
         results = query.all()
 
         if not results:
+            # Check if the database has any data for this exchange at all
+            exchange_record_count = db_session.query(SymToken).filter(
+                SymToken.exchange == exchange
+            ).count()
+
+            if exchange_record_count == 0:
+                logger.warning(
+                    f"No master contract data found for exchange: {exchange}. Database may need to be populated."
+                )
+                return (
+                    True,
+                    {
+                        "status": "success",
+                        "message": f"No master contract data available for {exchange}. Please download master contract data from the broker settings.",
+                        "data": [],
+                    },
+                    200,
+                )
+
             logger.info(
                 f"No expiry dates found for symbol: {symbol}, exchange: {exchange}, instrumenttype: {instrumenttype}"
             )
