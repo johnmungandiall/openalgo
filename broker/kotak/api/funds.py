@@ -145,6 +145,8 @@ def get_margin_data(auth_token):
                 # Collect all symbols for batch LTP fetch
                 symbols_to_fetch = []
                 position_map = {}  # Map symbol to position data
+                positions_needing_ltp = 0
+                positions_with_missing_ltp = 0
 
                 for position in positions:
                     # Calculate net quantity
@@ -254,12 +256,14 @@ def get_margin_data(auth_token):
                                 # Net long position - some bought shares were sold
                                 # Realized P&L = sellAmt - (avg_buy_price × sell_qty)
                                 avg_buy_price = total_buy_amt / total_buy_qty if total_buy_qty > 0 else 0
-                                realized_pnl = total_sell_amt - (avg_buy_price * total_sell_qty)
+                                # Round to 2 decimal places to match broker precision
+                                realized_pnl = round(total_sell_amt - (avg_buy_price * total_sell_qty), 2)
                             elif net_qty < 0:
                                 # Net short position - some sold shares were bought back
                                 # Realized P&L = (avg_sell_price × buy_qty) - buyAmt
                                 avg_sell_price = total_sell_amt / total_sell_qty if total_sell_qty > 0 else 0
-                                realized_pnl = (avg_sell_price * total_buy_qty) - total_buy_amt
+                                # Round to 2 decimal places to match broker precision
+                                realized_pnl = round((avg_sell_price * total_buy_qty) - total_buy_amt, 2)
                             else:
                                 # Should not reach here (net_qty == 0 handled above)
                                 realized_pnl = 0.0
