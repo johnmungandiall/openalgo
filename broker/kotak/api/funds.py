@@ -280,11 +280,13 @@ def get_margin_data(auth_token):
                         if net_qty > 0:
                             # Long position - calculate buy average including carry-forward
                             if total_buy_qty > 0:
-                                avg_price = total_buy_amt / total_buy_qty
+                                # Round average price to 2 decimal places
+                                avg_price = round(total_buy_amt / total_buy_qty, 2)
                         else:
                             # Short position - calculate sell average including carry-forward
                             if total_sell_qty > 0:
-                                avg_price = total_sell_amt / total_sell_qty
+                                # Round average price to 2 decimal places
+                                avg_price = round(total_sell_amt / total_sell_qty, 2)
 
                         # Get LTP from batch fetch
                         try:
@@ -311,7 +313,8 @@ def get_margin_data(auth_token):
                         # If batch fetch failed or returned no data, unrealized P&L was set from API fallback
                         if not use_api_fallback:  # Only calculate if we have LTP data
                             if ltp > 0 and avg_price > 0:
-                                unrealized = (ltp - avg_price) * net_qty
+                                # Round unrealized P&L to 2 decimal places
+                                unrealized = round((ltp - avg_price) * net_qty, 2)
                                 total_unrealised += unrealized
                                 logger.debug(
                                     f"Open Position {position.get('trdSym')}: qty={net_qty}, "
