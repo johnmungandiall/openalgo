@@ -242,11 +242,12 @@ def get_margin_data(auth_token):
                     if net_qty == 0:
                         # Closed position - use total buyAmt/sellAmt for accurate realized P&L
                         if total_buy_amt > 0 or total_sell_amt > 0:
-                            realized_pnl = total_sell_amt - total_buy_amt
+                            # Round to 2 decimal places to match broker precision
+                            realized_pnl = round(total_sell_amt - total_buy_amt, 2)
                             total_realised += realized_pnl
                             logger.debug(
                                 f"Closed Position {position.get('trdSym')}: "
-                                f"buyAmt={total_buy_amt}, sellAmt={total_sell_amt}, realized={realized_pnl:.2f}"
+                                f"buyAmt={total_buy_amt:.2f}, sellAmt={total_sell_amt:.2f}, realized={realized_pnl:.2f}"
                             )
                     else:
                         # Open position - calculate both realized and unrealized P&L
