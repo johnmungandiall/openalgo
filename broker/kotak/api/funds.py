@@ -352,14 +352,6 @@ def get_margin_data(auth_token):
                 f"Unrealized: {total_unrealised:.2f}"
             )
 
-        # Add GST (18%) to realized P&L
-        # GST is applicable on brokerage and transaction charges
-        GST_RATE = 0.18
-        gst_amount = abs(total_realised) * GST_RATE
-        total_realised_with_gst = total_realised - gst_amount  # Subtract GST from loss (makes it more negative)
-
-        logger.info(f"Realized P&L before GST: {total_realised:.2f}, GST: {gst_amount:.2f}, After GST: {total_realised_with_gst:.2f}")
-
         # Format function for accounting style (negative values in parentheses)
         def format_value(value, use_accounting_format=True):
             """Format value with optional accounting format for negatives."""
@@ -373,7 +365,7 @@ def get_margin_data(auth_token):
             "availablecash": format_value(collateral_value + pay_in - pay_out + collateral, False),
             "collateral": format_value(collateral, False),
             "m2munrealized": format_value(total_unrealised),
-            "m2mrealized": format_value(total_realised_with_gst),
+            "m2mrealized": format_value(total_realised),
             "utiliseddebits": format_value(safe_float(margin_data.get('MarginUsed')), False),
         }
 
