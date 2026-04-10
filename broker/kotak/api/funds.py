@@ -249,9 +249,25 @@ def get_margin_data(auth_token):
                                 f"buyAmt={total_buy_amt:.2f}, sellAmt={total_sell_amt:.2f}, realized={realized_pnl:.2f}"
                             )
                     else:
-                        # Open position - use rpnl for partial realized P&L
-                        rpnl = safe_float(position.get("rpnl"))
-                        total_realised += rpnl
+                        # Open position - calculate partial realized P&L manually
+                        # Don't use rpnl field as it's unreliable
+                        if total_sell_qty > 0 and total_buy_qty > 0:
+                            if net_qty > 0:
+                                # Net long position - some bought shares were sold
+                                # Realized P&L = sellAmt - (avg_buy_price × sell_qty)
+                                avg_buy_price = total_buy_amt / total_buy_qty if total_buy_qty > 0 else 0
+                                realized_pnl = round(total_sell_amt - (avg_buy_price * total_sell_qty), 2)
+                            else:
+                                # Net short position - some sold shares were bought back
+                                # Realized P&L = (avg_sell_price × buy_qty) - buyAmt
+                                avg_sell_price = total_sell_amt / total_sell_qty if total_sell_qty > 0 else 0
+                                realized_pnl = round((avg_sell_price * total_buy_qty) - total_buy_amt, 2)
+
+                            total_realised += realized_pnl
+                            logger.debug(
+                                f"Partial Realized P&L for {position.get('trdSym')}: "
+                                f"net_qty={net_qty}, realized={realized_pnl:.2f}"
+                            )
 
                         # Calculate unrealized PnL for open positions
                         # Include carry-forward in average price calculation
@@ -297,7 +313,7 @@ def get_margin_data(auth_token):
                                 total_unrealised += unrealized
                                 logger.debug(
                                     f"Open Position {position.get('trdSym')}: qty={net_qty}, "
-                                    f"avg={avg_price:.2f}, ltp={ltp:.2f}, unrealized={unrealized:.2f}, rpnl={rpnl:.2f}"
+                                    f"avg={avg_price:.2f}, ltp={ltp:.2f}, unrealized={unrealized:.2f}"
                                 )
                             else:
                                 logger.debug(
