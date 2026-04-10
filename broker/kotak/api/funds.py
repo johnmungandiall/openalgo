@@ -125,12 +125,9 @@ def get_margin_data(auth_token):
         pay_out = safe_float(margin_data.get("RmsPayOutAmt"))
         collateral = safe_float(margin_data.get("Collateral"))
 
-        # Use API-provided realized P&L (includes brokerage/charges)
-        total_realised = safe_float(margin_data.get('RealizedMtomPrsnt'))
+        # Calculate PnL from positions for accuracy
+        total_realised = 0.0
         total_unrealised = 0.0
-
-        logger.info(f"Using Kotak API-provided realized P&L: {total_realised:.2f}")
-        logger.debug("Realized P&L includes brokerage and transaction charges")
 
         try:
             # Import here to avoid circular dependency
@@ -230,18 +227,31 @@ def get_margin_data(auth_token):
 
                     net_qty = (fl_buy_qty - fl_sell_qty) + (cf_buy_qty - cf_sell_qty)
 
-                    # Only calculate unrealized P&L for open positions
-                    if net_qty != 0:
-                        # Get amounts including carry-forward
-                        fl_buy_amt = safe_float(position.get("buyAmt"))
-                        fl_sell_amt = safe_float(position.get("sellAmt"))
-                        cf_buy_amt = safe_float(position.get("cfBuyAmt"))
-                        cf_sell_amt = safe_float(position.get("cfSellAmt"))
+                    # Get amounts including carry-forward
+                    fl_buy_amt = safe_float(position.get("buyAmt"))
+                    fl_sell_amt = safe_float(position.get("sellAmt"))
+                    cf_buy_amt = safe_float(position.get("cfBuyAmt"))
+                    cf_sell_amt = safe_float(position.get("cfSellAmt"))
 
-                        total_buy_amt = fl_buy_amt + cf_buy_amt
-                        total_sell_amt = fl_sell_amt + cf_sell_amt
-                        total_buy_qty = fl_buy_qty + cf_buy_qty
-                        total_sell_qty = fl_sell_qty + cf_sell_qty
+                    total_buy_amt = fl_buy_amt + cf_buy_amt
+                    total_sell_amt = fl_sell_amt + cf_sell_amt
+                    total_buy_qty = fl_buy_qty + cf_buy_qty
+                    total_sell_qty = fl_sell_qty + cf_sell_qty
+
+                    # Handle realized P&L differently for closed vs open positions
+                    if net_qty == 0:
+                        # Closed position - calculate realized P&L from amounts
+                        if total_buy_amt > 0 or total_sell_amt > 0:
+                            realized_pnl = round(total_sell_amt - total_buy_amt, 2)
+                            total_realised += realized_pnl
+                            logger.debug(
+                                f"Closed Position {position.get('trdSym')}: "
+                                f"buyAmt={total_buy_amt:.2f}, sellAmt={total_sell_amt:.2f}, realized={realized_pnl:.2f}"
+                            )
+                    else:
+                        # Open position - use rpnl for partial realized P&L
+                        rpnl = safe_float(position.get("rpnl"))
+                        total_realised += rpnl
 
                         # Calculate unrealized PnL for open positions
                         # Include carry-forward in average price calculation
@@ -287,7 +297,7 @@ def get_margin_data(auth_token):
                                 total_unrealised += unrealized
                                 logger.debug(
                                     f"Open Position {position.get('trdSym')}: qty={net_qty}, "
-                                    f"avg={avg_price:.2f}, ltp={ltp:.2f}, unrealized={unrealized:.2f}"
+                                    f"avg={avg_price:.2f}, ltp={ltp:.2f}, unrealized={unrealized:.2f}, rpnl={rpnl:.2f}"
                                 )
                             else:
                                 logger.debug(
