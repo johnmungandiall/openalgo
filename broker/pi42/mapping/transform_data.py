@@ -28,13 +28,25 @@ def transform_order_data(data: Dict) -> Dict:
         'quantity': float(data['quantity'])
     }
 
-    # Add price for LIMIT orders
+    # Add price for LIMIT and STOP_LIMIT orders
     if data['pricetype'] in ['LIMIT', 'SL']:
         pi42_data['price'] = float(data['price'])
 
     # Add stop price for STOP orders
     if data['pricetype'] in ['SL', 'SL-M']:
         pi42_data['stopPrice'] = float(data.get('trigger_price', data.get('price', 0)))
+
+    # Add time in force (default GTC for LIMIT orders)
+    if data['pricetype'] in ['LIMIT', 'SL']:
+        pi42_data['timeInForce'] = data.get('time_in_force', 'GTC')
+
+    # Add reduce only flag
+    if data.get('reduce_only', False):
+        pi42_data['reduceOnly'] = True
+
+    # Add post only flag for maker orders
+    if data.get('post_only', False):
+        pi42_data['postOnly'] = True
 
     # Add crypto-specific fields
     if 'leverage' in data:
