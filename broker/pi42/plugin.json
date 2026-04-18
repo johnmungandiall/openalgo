@@ -1,0 +1,27 @@
+{
+  "broker_name": "pi42",
+  "broker_display_name": "Pi42",
+  "broker_type": "CRYPTO_futures",
+  "version": "1.0.0",
+  "description": "Pi42 cryptocurrency futures exchange integration",
+  "auth_type": "HMAC-SHA256",
+  "supports": {
+    "orders": true,
+    "positions": true,
+    "market_data": true,
+    "historical_data": true,
+    "websocket": true,
+    "leverage": true,
+    "margin_management": true,
+    "funding_rates": true
+  },
+  "order_types": ["MARKET", "LIMIT", "STOP_MARKET", "STOP_LIMIT"],
+  "margin_modes": ["ISOLATED", "CROSS"],
+  "margin_assets": ["USDT", "INR"],
+  "max_leverage": 25,
+  "rate_limits": {
+    "place_order": "20/second",
+    "cancel_order": "30/minute",
+    "default": "60/minute"
+  }
+}
