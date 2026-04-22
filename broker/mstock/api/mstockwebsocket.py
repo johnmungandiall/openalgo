@@ -240,6 +240,16 @@ class MstockWebSocket:
         ws.send(login_msg)
         logger.debug("Sent LOGIN message")
 
+        # Mark as logged in immediately after sending LOGIN.
+        # mStock may not send a text response to LOGIN — the one-off
+        # fetch_quote path confirms login works without waiting for a reply.
+        self._logged_in = True
+        self._login_event.set()
+        logger.info("mstock WebSocket login sent, marking as ready")
+
+        # Re-subscribe to existing subscriptions (needed after reconnection)
+        self._resubscribe_all()
+
     def _on_ws_message(self, ws, message):
         """Called for both binary and text messages"""
         if isinstance(message, bytes):
@@ -250,14 +260,6 @@ class MstockWebSocket:
                     self.data_callback(quote_data)
         elif isinstance(message, str):
             logger.debug(f"Received string message: {message}")
-            # Mark as logged in after receiving login response
-            if not self._logged_in:
-                self._logged_in = True
-                self._login_event.set()
-                logger.info("mstock login confirmed")
-
-                # Re-subscribe to existing subscriptions
-                self._resubscribe_all()
 
     def _on_ws_error(self, ws, error):
         """Called on WebSocket error"""
