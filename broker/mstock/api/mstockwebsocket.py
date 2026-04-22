@@ -422,3 +422,76 @@ class MstockWebSocket:
         except Exception as e:
             logger.error(f"Error fetching quote: {e}")
             return None
+
+    def fetch_quotes_batch(self, token_exchange_list: list, mode: int = 3) -> dict:
+        """
+        Fetch quotes for multiple tokens in a single WebSocket connection.
+
+        Args:
+            token_exchange_list: List of (token, exchange_type) tuples
+            mode: 1=LTP, 2=Quote, 3=SnapQuote (default, includes oi/bid/ask)
+
+        Returns:
+            dict: Map of token_str -> parsed quote dict
+        """
+        results = {}
+        if not token_exchange_list:
+            return results
+
+        try:
+            import websocket as ws_module
+
+            ws = ws_module.create_connection(
+                self.ws_url,
+                sslopt={"cert_reqs": ssl.CERT_NONE},
+                timeout=15,
+            )
+
+            # Login
+            ws.send(f"LOGIN:{self.auth_token}")
+            try:
+                ws.recv()
+            except Exception:
+                pass
+
+            # Group tokens by exchange_type
+            exchange_groups: dict[int, list[str]] = {}
+            for token, exchange_type in token_exchange_list:
+                if exchange_type not in exchange_groups:
+                    exchange_groups[exchange_type] = []
+                exchange_groups[exchange_type].append(str(token))
+
+            token_list = [
+                {"exchangeType": et, "tokens": tokens}
+                for et, tokens in exchange_groups.items()
+            ]
+
+            subscribe_msg = {
+                "action": 1,
+                "params": {"mode": mode, "tokenList": token_list},
+            }
+            ws.send(json.dumps(subscribe_msg))
+
+            expected = len(token_exchange_list)
+            ws.settimeout(10)
+
+            for _ in range(expected * 3):
+                try:
+                    response = ws.recv()
+                    if isinstance(response, bytes):
+                        if len(response) in [51, 123, 379] or len(response) >= 383:
+                            quote = self.parse_binary_packet(response)
+                            if quote and quote.get("token"):
+                                results[quote["token"]] = quote
+                            if len(results) >= expected:
+                                break
+                except Exception:
+                    break
+
+            ws.close()
+            logger.info(f"Batch WS fetch: got {len(results)}/{expected} quotes")
+            return results
+
+        except Exception as e:
+            logger.error(f"Error in fetch_quotes_batch: {e}")
+            return results
