@@ -274,56 +274,68 @@ def get_option_chain(
             # Use base symbol for index quotes (non-Delta)
             quote_symbol = base_symbol if embedded_expiry else underlying
 
-        # Step 3: Fetch underlying LTP
-        logger.info(f"Fetching LTP for {quote_symbol} on {quote_exchange}")
-        if exchange.upper() in CRYPTO_EXCHANGES:
-            # Initialise broker auth/module once here and reuse in Step 8 for the
-            # option multiquote fetch.  Doing it once avoids a duplicate DB query
-            # and module import inside the same request.
-            _auth, _feed, _broker = get_auth_token_broker(api_key, include_feed_token=True)
-            if _auth is None:
-                return False, {"status": "error", "message": "Invalid openalgo apikey"}, 403
-            _bmod = import_broker_module(_broker)
-            if _bmod is None:
-                return False, {"status": "error", "message": "Broker module not found"}, 404
-            _dh = _bmod.BrokerData(_auth)
-            try:
-                _q = _dh.get_quotes(quote_symbol, quote_exchange)
-                quote_response = {"data": _q}
-                success = True
-                status_code = 200
-            except Exception as _e:
+        # Resolve auth/broker once — reused across all fetch steps below
+        _auth, _feed, _broker = get_auth_token_broker(api_key, include_feed_token=True)
+        if _auth is None:
+            return False, {"status": "error", "message": "Invalid openalgo apikey"}, 403
+        _bmod = import_broker_module(_broker)
+        if _bmod is None:
+            return False, {"status": "error", "message": "Broker module not found"}, 404
+        _dh = _bmod.BrokerData(_auth)
+
+        # Step 3 (deferred for mstock): For brokers with get_quotes_with_batch we skip
+        # the standalone LTP fetch here and do it together with option quotes in Step 8.
+        # For all other brokers (and crypto) we fetch LTP now as before.
+        _supports_batch = hasattr(_dh, "get_quotes_with_batch") and exchange.upper() not in CRYPTO_EXCHANGES
+
+        if not _supports_batch:
+            logger.info(f"Fetching LTP for {quote_symbol} on {quote_exchange}")
+            if exchange.upper() in CRYPTO_EXCHANGES:
+                try:
+                    _q = _dh.get_quotes(quote_symbol, quote_exchange)
+                    quote_response = {"data": _q}
+                    success = True
+                    status_code = 200
+                except Exception as _e:
+                    return (
+                        False,
+                        {"status": "error", "message": f"Failed to fetch LTP for {quote_symbol}: {_e}"},
+                        500,
+                    )
+            else:
+                success, quote_response, status_code = get_quotes(
+                    symbol=quote_symbol, exchange=quote_exchange, api_key=api_key
+                )
+
+            if not success:
                 return (
                     False,
-                    {"status": "error", "message": f"Failed to fetch LTP for {quote_symbol}: {_e}"},
+                    {
+                        "status": "error",
+                        "message": f"Failed to fetch LTP for {quote_symbol}: {quote_response.get('message', 'Unknown error')}",
+                    },
+                    status_code,
+                )
+
+            underlying_data = quote_response.get("data", {})
+            underlying_ltp = underlying_data.get("ltp")
+            underlying_prev_close = underlying_data.get("prev_close", 0)
+            if underlying_ltp is None:
+                return (
+                    False,
+                    {"status": "error", "message": f"Could not determine LTP for {quote_symbol}"},
                     500,
                 )
+            logger.info(f"Underlying LTP: {underlying_ltp}, Prev Close: {underlying_prev_close}")
         else:
-            success, quote_response, status_code = get_quotes(
-                symbol=quote_symbol, exchange=quote_exchange, api_key=api_key
-            )
-
-        if not success:
-            return (
-                False,
-                {
-                    "status": "error",
-                    "message": f"Failed to fetch LTP for {quote_symbol}: {quote_response.get('message', 'Unknown error')}",
-                },
-                status_code,
-            )
-
-        underlying_data = quote_response.get("data", {})
-        underlying_ltp = underlying_data.get("ltp")
-        underlying_prev_close = underlying_data.get("prev_close", 0)
-        if underlying_ltp is None:
-            return (
-                False,
-                {"status": "error", "message": f"Could not determine LTP for {quote_symbol}"},
-                500,
-            )
-
-        logger.info(f"Underlying LTP: {underlying_ltp}, Prev Close: {underlying_prev_close}")
+            # Use REST LTP (no WS connection) just to find ATM strike.
+            # The real LTP + prev_close come from get_quotes_with_batch in Step 8.
+            logger.info(f"Fetching preliminary LTP via REST for {quote_symbol} on {quote_exchange}")
+            underlying_ltp = _dh.get_ltp_rest(quote_symbol, quote_exchange)
+            if underlying_ltp is None:
+                return False, {"status": "error", "message": f"Could not determine LTP for {quote_symbol}"}, 500
+            underlying_prev_close = 0
+            logger.info(f"Preliminary LTP (REST): {underlying_ltp}")
 
         # Step 4: Get options exchange and available strikes
         options_exchange = get_option_exchange(quote_exchange)
@@ -380,9 +392,19 @@ def get_option_chain(
 
         # Step 8: Fetch quotes for all options using multiquotes
         logger.info(f"Fetching quotes for {len(symbols_to_fetch)} option symbols")
-        if exchange.upper() in CRYPTO_EXCHANGES:
-            # Reuse _auth, _bmod, _dh already initialised in Step 3 — no second
-            # DB query or module import needed.
+        if _supports_batch:
+            # Single WS connection for underlying + all options (mstock optimisation)
+            logger.info(f"Using get_quotes_with_batch for {quote_symbol} + {len(symbols_to_fetch)} options")
+            _uq, _opt_results = _dh.get_quotes_with_batch(quote_symbol, quote_exchange, symbols_to_fetch)
+            if _uq:
+                # Refresh underlying data from the batch result
+                underlying_ltp = _uq.get("ltp", underlying_ltp)
+                underlying_prev_close = _uq.get("prev_close", underlying_prev_close)
+            quotes_response = {"status": "success", "results": _opt_results}
+            success = True
+            status_code = 200
+        elif exchange.upper() in CRYPTO_EXCHANGES:
+            # Reuse _dh already initialised above — no second DB query needed.
             try:
                 _results = []
                 for _item in symbols_to_fetch:
