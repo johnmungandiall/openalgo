@@ -156,6 +156,15 @@ All 30+ brokers follow a standardized structure in `broker/{broker_name}/`:
 
 Reference implementations: `/broker/zerodha/`, `/broker/dhan/`, `/broker/angel/`
 
+#### Quotes, Multiquotes, and Open Interest
+
+Broker REST quote APIs differ in **what fields they expose and which "mode" returns them.** Do not assume a broker supports a rich quote mode:
+
+- **Angel** (`/broker/angel/api/data.py`) uses `mode: "FULL"`, which returns `opnInterest`, `tradeVolume`, and `depth` (best bid/ask).
+- **mstock** (`/broker/mstock/api/data.py`) REST only supports `OHLC`/`LTP` — `FULL` is rejected with HTTP 400, so REST returns **no OI, volume, or depth.** Open interest there comes from the **binary snap-quote WebSocket feed (mode 3)**; `get_multiquotes()` builds an OHLC base via REST and overlays OI/bid/ask from a single short-lived WS connection (`MstockWebSocket.fetch_quotes_bulk()`). When opening such a fetch socket, do **not** block on the login `recv()` — it stalls ~10–15s; subscribe immediately after `LOGIN` and the snap quotes arrive in ~0.1s.
+
+This matters because of the **option-chain data flow** (`services/option_chain_service.py`): the underlying LTP is fetched via `get_quotes` and every CE/PE leg via `get_multiquotes`, then consumers (and `restx_api`/external apps) **skip any leg with `oi <= 0`**. A broker whose `get_multiquotes` returns `oi: 0` for F&O symbols therefore yields an **empty option chain**. When implementing or fixing a broker's data layer, ensure `get_multiquotes` populates real `oi` for F&O symbols — via the WebSocket snap-quote feed if the REST quote API cannot.
+
 ### WebSocket Architecture
 
 Real-time market data flows through a three-layer pipeline:

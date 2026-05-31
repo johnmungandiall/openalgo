@@ -422,3 +422,124 @@ class MstockWebSocket:
         except Exception as e:
             logger.error(f"Error fetching quote: {e}")
             return None
+
+    @classmethod
+    def _split_packets(cls, data: bytes) -> list[dict]:
+        """
+        Split a raw WebSocket frame into one or more parsed quote dicts.
+
+        A frame is either a single quote packet (51/123/379 bytes) or a batched
+        frame (>=383 bytes) carrying a 4-byte header (num_packets, packet_size)
+        followed by that many fixed-size packets.
+        """
+        quotes: list[dict] = []
+        if len(data) in (51, 123, 379):
+            quote = cls.parse_binary_packet(data)
+            if quote:
+                quotes.append(quote)
+        elif len(data) >= 383:
+            num_packets = struct.unpack("<H", data[0:2])[0]
+            packet_size = struct.unpack("<H", data[2:4])[0] or 379
+            for i in range(num_packets):
+                chunk = data[4 + i * packet_size : 4 + (i + 1) * packet_size]
+                if len(chunk) >= 51:
+                    quote = cls.parse_binary_packet(chunk)
+                    if quote:
+                        quotes.append(quote)
+        return quotes
+
+    def fetch_quotes_bulk(
+        self,
+        token_requests: list[tuple[str, int]],
+        mode: int = 3,
+        timeout: float = 5.0,
+    ) -> dict[str, dict]:
+        """
+        Fetch snap quotes for many tokens over a single WebSocket connection.
+
+        mstock has no REST endpoint for open interest or market depth — the
+        binary snap-quote feed (mode 3) is the only source. Opening one
+        short-lived connection and subscribing to every token at once keeps a
+        full option-chain fetch to well under a second.
+
+        The login acknowledgement is NOT awaited: blocking on it stalls the
+        socket ~10-15s, whereas the server accepts the subscribe and starts
+        pushing snap quotes immediately after a brief settle.
+
+        Args:
+            token_requests: list of (token, exchange_type) tuples.
+            mode: subscription mode (3 = snap quote with OI + depth).
+            timeout: max seconds to wait for packets after subscribing.
+
+        Returns:
+            dict mapping token (str) -> parsed quote dict. Tokens for which no
+            packet arrives within the timeout are simply absent.
+        """
+        import websocket as ws_module
+
+        results: dict[str, dict] = {}
+        if not token_requests:
+            return results
+
+        # Group tokens by exchange type for the subscribe payload
+        tokens_by_type: dict[int, list[str]] = {}
+        expected: set[str] = set()
+        for token, exchange_type in token_requests:
+            token = str(token)
+            tokens_by_type.setdefault(exchange_type, []).append(token)
+            expected.add(token)
+
+        ws = None
+        try:
+            ws = ws_module.create_connection(
+                self.ws_url,
+                sslopt={"cert_reqs": ssl.CERT_NONE},
+                timeout=10,
+            )
+
+            ws.send(f"LOGIN:{self.auth_token}")
+            # Brief settle instead of a blocking login-response recv (see docstring)
+            time.sleep(0.5)
+
+            # Subscribe in chunks to stay within per-message token limits while
+            # reusing the single connection.
+            CHUNK = 100
+            for exchange_type, tokens in tokens_by_type.items():
+                for i in range(0, len(tokens), CHUNK):
+                    subscribe_msg = {
+                        "action": 1,
+                        "params": {
+                            "mode": mode,
+                            "tokenList": [
+                                {"exchangeType": exchange_type, "tokens": tokens[i : i + CHUNK]}
+                            ],
+                        },
+                    }
+                    ws.send(json.dumps(subscribe_msg))
+
+            ws.settimeout(1.0)
+            deadline = time.time() + timeout
+            while time.time() < deadline and len(results) < len(expected):
+                try:
+                    message = ws.recv()
+                except Exception:
+                    continue
+                if not isinstance(message, bytes):
+                    continue
+                for quote in self._split_packets(message):
+                    token = quote.get("token")
+                    if token in expected:
+                        results[token] = quote
+
+            logger.info(f"Bulk snap-quote: {len(results)}/{len(expected)} tokens received")
+            return results
+
+        except Exception as e:
+            logger.error(f"Error in bulk quote fetch: {e}")
+            return results
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass

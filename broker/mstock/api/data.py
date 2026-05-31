@@ -211,7 +211,10 @@ class BrokerData:
 
             logger.debug(f"Fetching quotes for {symbol} (token: {token}, exchange: {api_exchange})")
 
-            # Call REST API for quote
+            # Call REST API for quote. mstock only supports OHLC and LTP modes here
+            # (FULL is rejected) — so OI, volume and depth are not available via REST.
+            # Single quotes are used mainly for index LTP, which carries no OI, so the
+            # OHLC snapshot is sufficient. Use get_multiquotes for OI-bearing legs.
             payload = {"mode": "OHLC", "exchangeTokens": {api_exchange: [str(token)]}}
 
             response = get_api_response("/instruments/quote", self.auth_token, "GET", payload)
@@ -365,8 +368,14 @@ class BrokerData:
                     exchange_tokens[api_exchange] = []
                 exchange_tokens[api_exchange].append(str(token))
 
-                # Store mapping for response processing
-                symbol_map[str(token)] = {"symbol": symbol, "exchange": exchange, "token": token}
+                # Store mapping for response processing (ex_type drives the WS
+                # snap-quote subscribe used to enrich with open interest)
+                symbol_map[str(token)] = {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "token": token,
+                    "ex_type": self.ws_exchange_map.get(exchange),
+                }
 
             except Exception as e:
                 logger.warning(f"Error preparing {symbol} on {exchange}: {str(e)}")
@@ -378,62 +387,109 @@ class BrokerData:
             logger.warning("No valid symbols to fetch quotes for")
             return skipped_symbols
 
-        # Step 2: Call REST API for bulk quotes
+        # Step 2: Fetch the OHLC base via REST. This is fast and reliable but
+        # mstock's REST quote endpoint only supports OHLC/LTP modes, so it
+        # carries no open interest, volume or market depth.
+        base = {}  # token_str -> OpenAlgo-format quote dict
         try:
             payload = {"mode": "OHLC", "exchangeTokens": exchange_tokens}
 
-            logger.info(f"Fetching {len(symbol_map)} quotes via REST API")
+            logger.info(f"Fetching {len(symbol_map)} OHLC quotes via REST API")
             response = get_api_response("/instruments/quote", self.auth_token, "GET", payload)
 
-            if not response.get("status"):
-                raise Exception(f"API error: {response.get('message', 'Unknown error')}")
-
-            # Step 3: Process response - fetched quotes
-            fetched = response.get("data", {}).get("fetched", [])
-
-            for quote_data in fetched:
-                token_str = str(quote_data.get("symbolToken", ""))
-                info = symbol_map.get(token_str)
-
-                if info:
-                    results.append(
-                        {
-                            "symbol": info["symbol"],
-                            "exchange": info["exchange"],
-                            "data": {
-                                "bid": 0,  # Not provided in OHLC mode
-                                "ask": 0,  # Not provided in OHLC mode
-                                "open": float(quote_data.get("open", 0)),
-                                "high": float(quote_data.get("high", 0)),
-                                "low": float(quote_data.get("low", 0)),
-                                "ltp": float(quote_data.get("ltp", 0)),
-                                "prev_close": float(quote_data.get("close", 0)),
-                                "volume": int(quote_data.get("volume", 0))
-                                if quote_data.get("volume")
-                                else 0,
-                                "oi": 0,  # Not provided in OHLC mode
-                            },
+            if response.get("status"):
+                for quote_data in response.get("data", {}).get("fetched", []):
+                    token_str = str(quote_data.get("symbolToken", ""))
+                    if token_str in symbol_map:
+                        base[token_str] = {
+                            "bid": 0,
+                            "ask": 0,
+                            "bid_qty": 0,
+                            "ask_qty": 0,
+                            "open": float(quote_data.get("open", 0)),
+                            "high": float(quote_data.get("high", 0)),
+                            "low": float(quote_data.get("low", 0)),
+                            "ltp": float(quote_data.get("ltp", 0)),
+                            "prev_close": float(quote_data.get("close", 0)),
+                            "volume": 0,
+                            "oi": 0,
                         }
-                    )
-                    # Remove from symbol_map to track unfetched
-                    del symbol_map[token_str]
+            else:
+                logger.warning(
+                    f"OHLC quote API error: {response.get('message', 'Unknown error')}"
+                )
+        except Exception as e:
+            logger.error(f"Error calling OHLC quote API: {str(e)}")
 
-            # Add unfetched symbols as errors
-            for token_str, info in symbol_map.items():
+        # Step 3: Enrich with open interest / volume / depth from the WS snap-quote
+        # feed (mode 3) — the only mstock source of OI. One short-lived connection
+        # subscribes to every token at once. Failures degrade gracefully to the
+        # OHLC base above (so the chain is never worse than REST-only).
+        try:
+            token_requests = [
+                (token_str, info["ex_type"])
+                for token_str, info in symbol_map.items()
+                if info.get("ex_type")
+            ]
+            ws_quotes = self.websocket.fetch_quotes_bulk(token_requests, mode=3)
+
+            for token_str, quote in ws_quotes.items():
+                data = base.setdefault(
+                    token_str,
+                    {
+                        "bid": 0,
+                        "ask": 0,
+                        "bid_qty": 0,
+                        "ask_qty": 0,
+                        "open": 0.0,
+                        "high": 0.0,
+                        "low": 0.0,
+                        "ltp": 0.0,
+                        "prev_close": 0.0,
+                        "volume": 0,
+                        "oi": 0,
+                    },
+                )
+
+                bids = quote.get("bids") or []
+                asks = quote.get("asks") or []
+                best_bid = bids[0] if bids else {}
+                best_ask = asks[0] if asks else {}
+
+                data["oi"] = int(quote.get("oi", 0))
+                # NOTE: the snap-quote binary `volume` field is unreliable
+                # (returns absurd values), so it is intentionally not overlaid —
+                # volume stays at the OHLC base (0). OI is the field we need here.
+                data["bid"] = float(best_bid.get("price", 0))
+                data["ask"] = float(best_ask.get("price", 0))
+                data["bid_qty"] = int(best_bid.get("quantity", 0))
+                data["ask_qty"] = int(best_ask.get("quantity", 0))
+
+                # Fall back to live snap values for any OHLC field REST left empty
+                if not data.get("ltp"):
+                    data["ltp"] = float(quote.get("ltp", 0))
+                for field in ("open", "high", "low"):
+                    if not data.get(field):
+                        data[field] = float(quote.get(field, 0))
+                if not data.get("prev_close"):
+                    data["prev_close"] = float(quote.get("close", 0))
+        except Exception as e:
+            logger.error(f"Error enriching quotes via WebSocket: {str(e)}")
+
+        # Step 4: Assemble results, marking any token with no data as an error
+        for token_str, info in symbol_map.items():
+            data = base.get(token_str)
+            if data:
+                results.append(
+                    {"symbol": info["symbol"], "exchange": info["exchange"], "data": data}
+                )
+            else:
                 results.append(
                     {
                         "symbol": info["symbol"],
                         "exchange": info["exchange"],
                         "error": "No data received",
                     }
-                )
-
-        except Exception as e:
-            logger.error(f"Error calling quote API: {str(e)}")
-            # Mark all remaining as errors
-            for info in symbol_map.values():
-                results.append(
-                    {"symbol": info["symbol"], "exchange": info["exchange"], "error": str(e)}
                 )
 
         logger.info(
