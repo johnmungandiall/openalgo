@@ -74,10 +74,49 @@ class MstockWebSocketAdapter(BaseBrokerWebSocketAdapter):
         self.logger.info("Connecting to mstock WebSocket in streaming mode...")
         self.running = True
 
-        # Start streaming — returns immediately (same as Angel/Upstox pattern)
-        self.ws_client.connect_stream(self._on_data)
+        # Start streaming — returns immediately (same as Angel/Upstox pattern).
+        # _flush_subscriptions runs once login is confirmed, sending any
+        # subscriptions that arrived before the socket finished connecting.
+        self.ws_client.connect_stream(self._on_data, on_login=self._flush_subscriptions)
         self.connected = True
         self.logger.info("mstock WebSocket adapter connected")
+
+    def _flush_subscriptions(self) -> None:
+        """Send all locally-stored subscriptions to the broker after login.
+
+        Subscriptions requested before the WebSocket finished its LOGIN
+        handshake are kept in self.subscriptions but never sent (subscribe()
+        only stores them and logs a warning). This replays them once the socket
+        is logged in, and also re-subscribes after a reconnect. Each token is
+        subscribed once at its highest requested mode.
+        """
+        # Collect the highest mode per token under the lock, then send outside it
+        with self.lock:
+            token_mode: dict[str, int] = {}
+            token_exchange_type: dict[str, Any] = {}
+            for sub in self.subscriptions.values():
+                token = sub["token"]
+                token_mode[token] = max(token_mode.get(token, 0), sub["mode"])
+                token_exchange_type[token] = sub["exchange_type"]
+
+        if not token_mode:
+            return
+
+        for token, mode in token_mode.items():
+            try:
+                correlation_id = f"mstock_{token}_{mode}"
+                if self.ws_client.subscribe_stream(
+                    correlation_id, token, token_exchange_type[token], mode
+                ):
+                    self.token_correlation_ids[token] = correlation_id
+                    self.token_modes[token] = mode
+                    self.logger.info(
+                        f"Flushed subscription for token {token} at mode {mode} after login"
+                    )
+                else:
+                    self.logger.warning(f"Failed to flush subscription for token {token}")
+            except Exception as e:
+                self.logger.error(f"Error flushing subscription for token {token}: {e}")
 
     def _on_data(self, quote_data: dict) -> None:
         """Callback function called when data is received from WebSocket"""

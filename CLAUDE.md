@@ -175,6 +175,15 @@ Real-time market data flows through a three-layer pipeline:
 
 3. **Unified WebSocket Proxy Server** (`websocket_proxy/server.py`, port 8765): Subscribes to ZeroMQ, manages client WebSocket connections, handles symbol subscriptions/unsubscriptions, and delivers filtered ticks to each connected client. Includes per-symbol throttling to prevent flooding slow clients.
 
+#### Broker adapter connect → login → subscribe (a common pitfall)
+
+`adapter.connect()` starts the broker socket on a background thread and returns immediately, so **subscriptions can arrive before the socket has authenticated.** Two things must be handled or the feed silently delivers nothing:
+
+- **Login confirmation.** Don't assume the broker sends a login-ack frame. **mstock sends none** — its streaming client (`broker/mstock/api/mstockwebsocket.py`) confirms login *implicitly* ~0.5s after the socket opens (`_confirm_login`); waiting for an ack that never comes leaves `is_connected()` permanently `False` and **no market data ever flows.** Don't block on a login `recv()` either (it stalls ~10–15s).
+- **Flushing early subscriptions.** Subscriptions requested before login are stored on the adapter but not yet sent to the broker. Flush them once login is confirmed (mstock uses an `on_login` callback → `_flush_subscriptions`), and re-flush after a reconnect — otherwise those symbols are subscribed in OpenAlgo's view but never on the broker, so they never tick.
+
+To verify a streaming fix end-to-end, subscribe a **fresh** symbol (one not already subscribed at startup) via the proxy and confirm a `market_data` frame arrives — a broker snap/snapshot tick fires on subscribe even when the market is closed.
+
 ### Request Processing Pipeline
 
 WSGI middleware wraps in reverse order — last registered is outermost. The request flows:

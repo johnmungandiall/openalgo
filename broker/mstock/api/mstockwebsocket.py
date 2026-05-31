@@ -38,10 +38,16 @@ class MstockWebSocket:
         self.running = False
         self._connected = False
         self.data_callback = None
+        self.on_login_callback = None
         self.subscriptions: dict[str, dict] = {}
         self._ws_thread: threading.Thread | None = None
         self._logged_in = False
         self._login_event = threading.Event()
+        self._login_lock = threading.Lock()
+        # mstock sends no login-acknowledgement frame, so login is confirmed
+        # implicitly this many seconds after the socket opens (the same brief
+        # settle that fetch_quotes_bulk relies on before subscribing).
+        self._login_settle_secs = 0.5
 
     @staticmethod
     def parse_binary_packet(data: bytes) -> dict | None:
@@ -165,15 +171,21 @@ class MstockWebSocket:
 
     # ==================== Streaming Mode Methods ====================
 
-    def connect_stream(self, data_callback):
+    def connect_stream(self, data_callback, on_login=None):
         """
         Start persistent WebSocket connection for streaming data.
         Returns immediately — connection happens in background thread.
 
         Args:
             data_callback: Callback function(quote_data) called when data is received
+            on_login: Optional callback invoked (no args) once login is confirmed,
+                on the initial connection and after every reconnect. Lets the
+                caller flush subscriptions that were requested before the socket
+                finished its LOGIN handshake. When provided it replaces the
+                built-in _resubscribe_all() so subscriptions are not sent twice.
         """
         self.data_callback = data_callback
+        self.on_login_callback = on_login
         self.running = True
         self._logged_in = False
         self._login_event.clear()
@@ -240,6 +252,44 @@ class MstockWebSocket:
         ws.send(login_msg)
         logger.debug("Sent LOGIN message")
 
+        # mstock does not send a login-acknowledgement frame, so confirm login
+        # implicitly after a brief settle (a string ack, if one ever arrives,
+        # confirms it sooner via _on_ws_message). Done off-thread so the open
+        # handler does not block the reader.
+        threading.Thread(target=self._post_login_settle, daemon=True).start()
+
+    def _post_login_settle(self):
+        """Confirm login implicitly once the socket has had time to settle."""
+        time.sleep(self._login_settle_secs)
+        if self.running and self._connected:
+            self._confirm_login()
+
+    def _confirm_login(self):
+        """Mark the session logged in and flush subscriptions exactly once.
+
+        Idempotent and thread-safe: invoked from both the post-login settle
+        timer and the string-message handler, whichever fires first.
+        """
+        with self._login_lock:
+            if self._logged_in:
+                return
+            self._logged_in = True
+            self._login_event.set()
+
+        logger.info("mstock login confirmed")
+
+        # Flush subscriptions now that the socket is logged in. The
+        # adapter-supplied callback is authoritative when present (it replays
+        # subscriptions requested before login); otherwise fall back to
+        # replaying this client's own subscription dict.
+        if self.on_login_callback:
+            try:
+                self.on_login_callback()
+            except Exception as e:
+                logger.error(f"Error in on_login callback: {e}")
+        else:
+            self._resubscribe_all()
+
     def _on_ws_message(self, ws, message):
         """Called for both binary and text messages"""
         if isinstance(message, bytes):
@@ -250,14 +300,9 @@ class MstockWebSocket:
                     self.data_callback(quote_data)
         elif isinstance(message, str):
             logger.debug(f"Received string message: {message}")
-            # Mark as logged in after receiving login response
-            if not self._logged_in:
-                self._logged_in = True
-                self._login_event.set()
-                logger.info("mstock login confirmed")
-
-                # Re-subscribe to existing subscriptions
-                self._resubscribe_all()
+            # A string frame (if mstock ever sends one) confirms login early;
+            # otherwise the post-login settle timer handles it.
+            self._confirm_login()
 
     def _on_ws_error(self, ws, error):
         """Called on WebSocket error"""
