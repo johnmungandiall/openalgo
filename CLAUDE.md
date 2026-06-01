@@ -165,6 +165,14 @@ Broker REST quote APIs differ in **what fields they expose and which "mode" retu
 
 This matters because of the **option-chain data flow** (`services/option_chain_service.py`): the underlying LTP is fetched via `get_quotes` and every CE/PE leg via `get_multiquotes`, then consumers (and `restx_api`/external apps) **skip any leg with `oi <= 0`**. A broker whose `get_multiquotes` returns `oi: 0` for F&O symbols therefore yields an **empty option chain**. When implementing or fixing a broker's data layer, ensure `get_multiquotes` populates real `oi` for F&O symbols — via the WebSocket snap-quote feed if the REST quote API cannot.
 
+#### Funds: realised / unrealised M2M may not live in the funds endpoint
+
+The same "the field exists in the response but is always null/zero" trap applies to **funds** (`api/funds.py` → `get_margin_data` → `/api/v1/funds`). Don't assume a broker's fund/margin endpoint actually populates M2M:
+
+- **mstock** (`/broker/mstock/api/funds.py`): the Type B `fundsummary` endpoint returns `REALISED_PROFITS` and `MTM_COMBINED` as `null` **unconditionally**, so mapping them straight through made `/api/v1/funds` always report `m2mrealized: 0` and `m2munrealized: 0`. Real M2M is derived from the **positions feed** (`/portfolio/positions`) instead, split the way the broker's own UI does it: `netqty == 0` (closed) → realised, `netqty != 0` (open) → unrealised. Balance fields (`availablecash`/`collateral`/`utiliseddebits`) still come from `fundsummary`. (mstock's Type A endpoints expose realised/unrealised directly, but need a separate Type A token — the Type B session token gets `TokenException` there.)
+
+The contract (`/api/v1/funds`) **requires** numeric `collateral`, `m2mrealized`, `m2munrealized`; a poller that charts `collateral + m2mrealized + m2munrealized` skips the sample entirely if any is missing/non-numeric — so always emit real numbers, deriving M2M from positions when the funds endpoint can't.
+
 ### WebSocket Architecture
 
 Real-time market data flows through a three-layer pipeline:

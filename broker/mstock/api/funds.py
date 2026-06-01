@@ -2,11 +2,58 @@ import os
 
 import httpx
 
+from broker.mstock.api.order_api import get_positions
 from broker.mstock.database import master_contract_db
 from utils.httpx_client import get_httpx_client
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _to_float(value, default=0.0):
+    """Coerce mStock string/None numeric fields to float."""
+    if value in (None, "None", ""):
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def _compute_m2m_from_positions(auth_token):
+    """Compute realised / unrealised M2M from the positions feed.
+
+    mStock's Type B ``fundsummary`` always returns ``REALISED_PROFITS`` and
+    ``MTM_COMBINED`` as ``null``, so account-level M2M is never available there.
+    The positions endpoint, however, carries per-position P&L in ``netvalue``.
+    We split it the same way the mStock web UI does:
+
+    - ``netqty == 0`` → position is fully closed → P&L is **realised**.
+    - ``netqty != 0`` → position still open → P&L is **unrealised** (M2M).
+
+    Returns:
+        tuple[float, float]: ``(m2mrealized, m2munrealized)``.
+    """
+    realized = 0.0
+    unrealized = 0.0
+    try:
+        positions = get_positions(auth_token)
+        rows = positions.get("data") if isinstance(positions, dict) else None
+        if not isinstance(rows, list):
+            return realized, unrealized
+
+        for position in rows:
+            netvalue = _to_float(position.get("netvalue"))
+            netqty = int(_to_float(position.get("netqty")))
+            if netqty == 0:
+                realized += netvalue
+            else:
+                unrealized += netvalue
+    except Exception:
+        logger.exception("Error computing M2M from positions; defaulting to 0.")
+        return 0.0, 0.0
+
+    return realized, unrealized
 
 
 def get_margin_data(auth_token):
@@ -46,24 +93,19 @@ def get_margin_data(auth_token):
         logger.debug(f"Full margin data response: {margin_data}")
         if margin_data.get("status") == True and margin_data.get("data"):
             data = margin_data["data"][0]
-            key_mapping = {
-                "AVAILABLE_BALANCE": "availablecash",
-                "COLLATERALS": "collateral",
-                "REALISED_PROFITS": "m2mrealized",
-                "MTM_COMBINED": "m2munrealized",
-                "AMOUNT_UTILIZED": "utiliseddebits",
-            }
 
-            filtered_data = {}
-            for mstock_key, openalgo_key in key_mapping.items():
-                value = data.get(mstock_key)
-                if value in (None, "None", ""):
-                    value = 0
-                try:
-                    formatted_value = f"{float(value):.2f}"
-                except (ValueError, TypeError):
-                    formatted_value = "0.00"
-                filtered_data[openalgo_key] = formatted_value
+            # Balance fields come straight from fundsummary. mStock's
+            # REALISED_PROFITS / MTM_COMBINED are always null here, so M2M is
+            # derived from the positions feed instead (see helper above).
+            m2mrealized, m2munrealized = _compute_m2m_from_positions(auth_token)
+
+            filtered_data = {
+                "availablecash": f"{_to_float(data.get('AVAILABLE_BALANCE')):.2f}",
+                "collateral": f"{_to_float(data.get('COLLATERALS')):.2f}",
+                "m2mrealized": f"{m2mrealized:.2f}",
+                "m2munrealized": f"{m2munrealized:.2f}",
+                "utiliseddebits": f"{_to_float(data.get('AMOUNT_UTILIZED')):.2f}",
+            }
 
             logger.debug(f"filteredMargin Data: {filtered_data}")
             return filtered_data
