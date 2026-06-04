@@ -2,8 +2,13 @@ import os
 
 import httpx
 
+from broker.mstock.api.data import BrokerData
 from broker.mstock.api.order_api import get_positions
 from broker.mstock.database import master_contract_db
+from broker.mstock.mapping.order_data import (
+    map_broker_exchange_to_openalgo,
+    map_position_data,
+)
 from utils.httpx_client import get_httpx_client
 from utils.logging import get_logger
 
@@ -20,40 +25,98 @@ def _to_float(value, default=0.0):
         return default
 
 
+def calculate_pnl(entry, ltp=None):
+    """Realised / unrealised P&L for a single mStock position.
+
+    Mirrors flattrade's positions-based split. mStock's positions feed carries
+    no per-leg realised/unrealised fields (no ``rpnl`` / ``urmtom``), so they are
+    derived from ``netvalue`` plus the average cost of any open quantity, marking
+    the open qty to live ``ltp`` exactly like flattrade's
+    ``(lp - netavgprc) * netqty * prcftr`` formula.
+
+    - ``netqty == 0`` (closed) → all of ``netvalue`` is **realised**.
+    - ``netqty != 0`` (open) → ``unrealised = (ltp - avgnetprice) * netqty * mult``
+      and ``realised = netvalue + avgnetprice * netqty * mult`` (the booked leg).
+      This identity makes ``realised + unrealised`` equal the position's full
+      mark-to-market P&L. When ``ltp`` is unavailable the open leg falls back to
+      booked-only (``realised = netvalue``, ``unrealised = 0``).
+
+    Args:
+        entry: One raw mStock position dict.
+        ltp: Live last-traded price for the position symbol, or ``None``.
+
+    Returns:
+        tuple[float, float]: ``(realized, unrealized)``.
+    """
+    netqty = _to_float(entry.get("netqty"))
+    netvalue = _to_float(entry.get("netvalue"))
+    avgnetprice = _to_float(entry.get("avgnetprice"))
+    multiplier = _to_float(entry.get("multiplier"), 1.0) or 1.0
+
+    if netqty == 0 or ltp is None:
+        # Fully closed, or no live price to mark the open qty → booked only.
+        return netvalue, 0.0
+
+    unrealized = (ltp - avgnetprice) * netqty * multiplier
+    realized = netvalue + avgnetprice * netqty * multiplier
+    return realized, unrealized
+
+
 def _compute_m2m_from_positions(auth_token):
-    """Compute realised / unrealised M2M from the positions feed.
+    """Compute total realised / unrealised M2M from the positions feed.
 
     mStock's Type B ``fundsummary`` always returns ``REALISED_PROFITS`` and
     ``MTM_COMBINED`` as ``null``, so account-level M2M is never available there.
-    The positions endpoint, however, carries per-position P&L in ``netvalue``.
-    We split it the same way the mStock web UI does:
-
-    - ``netqty == 0`` → position is fully closed → P&L is **realised**.
-    - ``netqty != 0`` → position still open → P&L is **unrealised** (M2M).
+    Following flattrade, M2M is summed per position from ``/portfolio/positions``,
+    fetching a live LTP for each *open* leg so its unrealised P&L is a true
+    mark-to-market (see :func:`calculate_pnl`).
 
     Returns:
         tuple[float, float]: ``(m2mrealized, m2munrealized)``.
     """
-    realized = 0.0
-    unrealized = 0.0
+    total_realized = 0.0
+    total_unrealized = 0.0
     try:
-        positions = get_positions(auth_token)
-        rows = positions.get("data") if isinstance(positions, dict) else None
-        if not isinstance(rows, list):
-            return realized, unrealized
+        # map_position_data fills tradingsymbol (OpenAlgo format) from the
+        # symboltoken and leaves the raw numeric fields intact.
+        rows = map_position_data(get_positions(auth_token))
+        if not rows:
+            return total_realized, total_unrealized
 
+        broker_data = None
         for position in rows:
-            netvalue = _to_float(position.get("netvalue"))
-            netqty = int(_to_float(position.get("netqty")))
-            if netqty == 0:
-                realized += netvalue
-            else:
-                unrealized += netvalue
+            netqty = _to_float(position.get("netqty"))
+            ltp = None
+
+            if netqty != 0:
+                # Open leg → fetch a live LTP to mark it to market.
+                symbol = position.get("tradingsymbol")
+                oa_exchange = map_broker_exchange_to_openalgo(
+                    position.get("exchange", ""), position.get("instrumenttype", "")
+                )
+                if symbol and oa_exchange:
+                    try:
+                        if broker_data is None:
+                            broker_data = BrokerData(auth_token)
+                        quote = broker_data.get_quotes(symbol, oa_exchange)
+                        ltp = _to_float(quote.get("ltp")) if quote else None
+                        if not ltp:  # 0 or None → don't mark to a bogus price
+                            ltp = None
+                    except Exception:
+                        logger.exception(
+                            f"Failed to fetch LTP for open position {symbol} "
+                            f"({oa_exchange}); falling back to booked P&L."
+                        )
+                        ltp = None
+
+            realized, unrealized = calculate_pnl(position, ltp)
+            total_realized += realized
+            total_unrealized += unrealized
     except Exception:
         logger.exception("Error computing M2M from positions; defaulting to 0.")
         return 0.0, 0.0
 
-    return realized, unrealized
+    return total_realized, total_unrealized
 
 
 def get_margin_data(auth_token):
