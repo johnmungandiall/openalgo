@@ -6,6 +6,7 @@ from broker.mstock.api.data import BrokerData
 from broker.mstock.api.order_api import get_positions
 from broker.mstock.database import master_contract_db
 from broker.mstock.mapping.order_data import (
+    get_signed_netqty,
     map_broker_exchange_to_openalgo,
     map_position_data,
 )
@@ -48,7 +49,9 @@ def calculate_pnl(entry, ltp=None):
     Returns:
         tuple[float, float]: ``(realized, unrealized)``.
     """
-    netqty = _to_float(entry.get("netqty"))
+    # Signed net qty (negative = short) — mStock's raw netqty sign is
+    # unreliable for shorts, so a short in loss would otherwise show as profit.
+    netqty = get_signed_netqty(entry)
     netvalue = _to_float(entry.get("netvalue"))
     avgnetprice = _to_float(entry.get("avgnetprice"))
     multiplier = _to_float(entry.get("multiplier"), 1.0) or 1.0
@@ -85,7 +88,7 @@ def _compute_m2m_from_positions(auth_token):
 
         broker_data = None
         for position in rows:
-            netqty = _to_float(position.get("netqty"))
+            netqty = get_signed_netqty(position)
             ltp = None
 
             if netqty != 0:

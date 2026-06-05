@@ -29,6 +29,47 @@ def map_broker_exchange_to_openalgo(broker_exchange, instrumenttype=""):
     return broker_exchange
 
 
+def _to_int(value, default=0):
+    """Parse a possibly-string/float mStock quantity field to int."""
+    if value in (None, "None", ""):
+        return default
+    try:
+        return int(float(value))
+    except (ValueError, TypeError):
+        return default
+
+
+def get_signed_netqty(position):
+    """Net position quantity with a reliable sign (negative = short).
+
+    OpenAlgo's convention is that a short/sell position carries a **negative**
+    quantity. mStock's ``netqty`` sign for shorts can't be trusted across all
+    payloads, so the magnitude is taken from ``netqty`` while the **direction**
+    is derived from total buy vs total sell quantity (including carry-forward),
+    which is unambiguous.
+
+    This is a no-op when ``netqty`` is already correctly signed (the re-derived
+    sign matches), and a correction when mStock returns a short as a positive
+    magnitude. Long and fully-closed positions are unaffected.
+
+    Args:
+        position: One raw mStock position dict.
+
+    Returns:
+        int: Signed net quantity (positive long, negative short, 0 closed).
+    """
+    magnitude = abs(_to_int(position.get("netqty")))
+    total_buy = _to_int(position.get("buyqty")) + _to_int(position.get("cfbuyqty"))
+    total_sell = _to_int(position.get("sellqty")) + _to_int(position.get("cfsellqty"))
+
+    if total_sell > total_buy:
+        return -magnitude
+    if total_buy > total_sell:
+        return magnitude
+    # Direction indeterminate (buy/sell qty balanced or absent) → trust netqty.
+    return _to_int(position.get("netqty"))
+
+
 def map_order_data(order_data):
     """
     Processes and modifies order data from mStock Type B API.
@@ -475,11 +516,12 @@ def transform_positions_data(positions_data):
         return transformed_data
 
     for position in positions_data:
-        # Convert netqty to int, handle string values
-        try:
-            quantity = int(position.get("netqty", 0))
-        except (ValueError, TypeError):
-            quantity = 0
+        # Net quantity with a reliable sign (negative = short). mStock's raw
+        # netqty sign for shorts is unreliable, so direction is re-derived
+        # from buy/sell qty — otherwise a short leg's P&L flips sign downstream
+        # (positions display, /api/v1/funds M2M, and the engine's client-side
+        # unrealized which reads this `quantity`).
+        quantity = get_signed_netqty(position)
 
         # Convert avgnetprice to float
         try:
