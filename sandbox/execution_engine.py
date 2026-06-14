@@ -510,10 +510,17 @@ class ExecutionEngine:
                         else Decimal("0.00")
                     )
 
+                    # Always book realized P&L into funds. release_margin handles
+                    # amount=0 safely (no-op for margin), so calling it
+                    # unconditionally books the P&L even for zero-margin closes
+                    # (e.g. long option buys whose premium is debited rather than
+                    # margin-blocked). Gating this on margin_to_release > 0 dropped
+                    # that P&L from /api/v1/funds while the position kept it,
+                    # making the Positions page total diverge from funds realized.
+                    fund_manager.release_margin(
+                        margin_to_release, realized_pnl, f"Position closed: {order.symbol}"
+                    )
                     if margin_to_release > 0:
-                        fund_manager.release_margin(
-                            margin_to_release, realized_pnl, f"Position closed: {order.symbol}"
-                        )
                         logger.info(
                             f"Released exact margin ₹{margin_to_release} for closed position (from position.margin_blocked)"
                         )
@@ -607,10 +614,12 @@ class ExecutionEngine:
                     else:
                         margin_to_release = Decimal("0.00")
 
+                    # Always book realized P&L (only the margin amount is gated) —
+                    # same rationale as the full-close path above.
+                    fund_manager.release_margin(
+                        margin_to_release, realized_pnl, f"Position reduced: {order.symbol}"
+                    )
                     if margin_to_release > 0:
-                        fund_manager.release_margin(
-                            margin_to_release, realized_pnl, f"Position reduced: {order.symbol}"
-                        )
                         logger.info(
                             f"Released proportional margin ₹{margin_to_release} for reduced position ({reduction_proportion * 100:.1f}% of ₹{current_margin})"
                         )
