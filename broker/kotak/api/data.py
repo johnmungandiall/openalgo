@@ -16,10 +16,12 @@ logger = get_logger(__name__)
 
 class BrokerData:
     def __init__(self, auth_token):
-        # Updated for Neo API v2: session_token:::session_sid:::base_url:::access_token
+        # Updated for Neo API v2: session_token:::session_sid:::base_url:::access_token:::server_id
+        # Quotes use the access_token Authorization header (no sId), so slice to the
+        # first 4 components — this also tolerates a 5-part token without breaking.
         self.session_token, self.session_sid, self.base_url, self.access_token = auth_token.split(
             ":::"
-        )
+        )[:4]
 
         # baseUrl is mandatory; it comes from MPIN validation. Raise if missing.
         if not self.base_url or not self.base_url.startswith("http"):

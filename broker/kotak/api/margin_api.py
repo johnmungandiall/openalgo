@@ -18,13 +18,16 @@ def calculate_single_margin(position_data, auth_token):
 
     Args:
         position_data: Transformed position data in Kotak format
-        auth_token: Authentication token (session_token:::session_sid:::base_url:::access_token)
+        auth_token: Authentication token
+            (session_token:::session_sid:::base_url:::access_token:::server_id)
 
     Returns:
         Tuple of (response, parsed_response_data)
     """
-    # Parse auth token
-    session_token, session_sid, base_url, access_token = auth_token.split(":::")
+    # Parse auth token (server_id optional for backward compatibility with pre-v2 tokens)
+    parts = auth_token.split(":::")
+    session_token, session_sid, base_url, access_token = parts[:4]
+    server_id = parts[4] if len(parts) > 4 else ""
 
     # Debug logging for baseUrl
     logger.debug(f"MARGIN API - Using baseUrl: {base_url}")
@@ -47,12 +50,14 @@ def calculate_single_margin(position_data, auth_token):
 
     logger.debug(f"Kotak margin calculation payload: {payload}")
 
+    params = {"sId": server_id} if server_id else None
+
     # Construct full URL
     url = f"{base_url}/quick/user/check-margin"
 
     try:
         # Make the request
-        response = client.post(url, headers=headers, content=payload)
+        response = client.post(url, headers=headers, content=payload, params=params)
 
         # Add status attribute for compatibility
         response.status = response.status_code

@@ -13,14 +13,15 @@ def get_margin_data(auth_token):
     """
     Fetch margin data from the broker's API using the provided auth token.
 
-    Auth token format: trading_token:::trading_sid:::base_url:::access_token
+    Auth token format: trading_token:::trading_sid:::base_url:::access_token:::server_id
+    (server_id is optional for backward compatibility with pre-v2 tokens)
     """
     try:
         # Parse auth token components
         access_token_parts = auth_token.split(":::")
-        if len(access_token_parts) != 4:
+        if len(access_token_parts) < 4:
             logger.error(
-                f"Invalid auth token format. Expected 4 parts, got {len(access_token_parts)}"
+                f"Invalid auth token format. Expected at least 4 parts, got {len(access_token_parts)}"
             )
             return {}
 
@@ -28,6 +29,8 @@ def get_margin_data(auth_token):
         trading_sid = access_token_parts[1]
         base_url = access_token_parts[2]
         access_token = access_token_parts[3]
+        # hsServerId; sent as the 'sId' query param so Neo API v2 returns funds data
+        server_id = access_token_parts[4] if len(access_token_parts) > 4 else ""
 
         if not base_url:
             logger.error("Base URL not found in auth token")
@@ -51,12 +54,14 @@ def get_margin_data(auth_token):
             "Content-Type": "application/x-www-form-urlencoded",
         }
 
+        params = {"sId": server_id} if server_id else None
+
         # Construct full URL
         url = f"{base_url}/quick/user/limits"
 
         logger.debug(f"Making POST request to {url}")
 
-        response = client.post(url, headers=headers, content=payload)
+        response = client.post(url, headers=headers, content=payload, params=params)
 
         logger.debug(f"Kotak Limits API Response Status: {response.status_code}")
         logger.debug(f"Kotak Limits API Response: {response.text}")

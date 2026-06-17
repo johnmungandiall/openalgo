@@ -25,13 +25,15 @@ def authenticate_broker(mobile_number, totp, mpin):
 
     Returns:
         Tuple of (auth_string, error_message)
-        auth_string format: "trading_token:::trading_sid:::base_url:::access_token"
+        auth_string format: "trading_token:::trading_sid:::base_url:::access_token:::server_id"
 
         Components:
         - trading_token: Used in 'Auth' header for API calls
         - trading_sid: Used in 'Sid' header for API calls
         - base_url: Base URL for all API endpoints (e.g., https://cis.kotaksecurities.com)
         - access_token: Original API access token (kept for reference)
+        - server_id: hsServerId from MPIN validation, sent as the 'sId' query param
+          on order/report/funds endpoints (Neo API v2 returns empty data without it)
     """
     try:
         logger.info("Starting Kotak TOTP authentication flow")
@@ -129,22 +131,31 @@ def authenticate_broker(mobile_number, totp, mpin):
             logger.error(f"MPIN Validation Failed - Response: {data_dict}")
             return None, f"MPIN Validation Error: {error_msg}"
 
-        # Extract Trading token, sid, and baseUrl
+        # Extract Trading token, sid, baseUrl, and hsServerId
         trading_token = data_dict["data"]["token"]
         trading_sid = data_dict["data"]["sid"]
         base_url = data_dict["data"].get("baseUrl", "")
+        # Neo API v2 requires hsServerId as the 'sId' query param on order/report/
+        # funds endpoints; without it those endpoints return empty data.
+        server_id = data_dict["data"].get("hsServerId", "")
 
         if not base_url:
             logger.warning("baseUrl not found in MPIN validation response, API calls may fail")
 
+        if not server_id:
+            logger.warning(
+                "hsServerId not found in MPIN validation response; orderbook/positions/funds "
+                "may return empty data"
+            )
+
         logger.info("Kotak TOTP authentication completed successfully")
         logger.debug(f"Base URL for API calls: {base_url}")
 
-        # Create auth string: trading_token:::trading_sid:::base_url:::access_token
+        # Create auth string: trading_token:::trading_sid:::base_url:::access_token:::server_id
         # This format allows extracting all components needed for subsequent API calls
-        auth_string = f"{trading_token}:::{trading_sid}:::{base_url}:::{access_token}"
+        auth_string = f"{trading_token}:::{trading_sid}:::{base_url}:::{access_token}:::{server_id}"
         logger.debug(
-            f"AUTH TOKEN CREATED: {trading_token[:10]}...:::{trading_sid}:::{base_url}:::{access_token[:10]}..."
+            f"AUTH TOKEN CREATED: {trading_token[:10]}...:::{trading_sid}:::{base_url}:::{access_token[:10]}...:::{server_id}"
         )
 
         return auth_string, None

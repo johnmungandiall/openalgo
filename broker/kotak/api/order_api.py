@@ -22,11 +22,28 @@ from utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-def get_api_response(endpoint, auth_token, method="GET", payload=""):
+def _parse_auth_token(auth_token):
+    """Parse the Kotak auth string into its components.
+
+    Format: session_token:::session_sid:::base_url:::access_token:::server_id
+    The trailing server_id (hsServerId) was added for Neo API v2; tokens created
+    before that change have only 4 parts, so server_id defaults to "".
+    """
+    parts = auth_token.split(":::")
+    session_token, session_sid, base_url, access_token = parts[:4]
+    server_id = parts[4] if len(parts) > 4 else ""
+    return session_token, session_sid, base_url, access_token, server_id
+
+
+def get_api_response(endpoint, auth_token, method="GET", payload="", with_sid=True):
     """
     Updated for Kotak Neo API v2 - uses dynamic baseUrl, httpx connection pooling, and new header structure
+
+    Neo API v2 requires the hsServerId as the 'sId' query param on order/report/funds
+    endpoints; without it the broker returns empty data. Holdings is the exception
+    (it must NOT receive sId), so callers pass with_sid=False for that endpoint.
     """
-    session_token, session_sid, base_url, access_token = auth_token.split(":::")
+    session_token, session_sid, base_url, access_token, server_id = _parse_auth_token(auth_token)
 
     # Debug logging for baseUrl
     logger.info(f"ORDER API - Using baseUrl: {base_url}")
@@ -41,11 +58,15 @@ def get_api_response(endpoint, auth_token, method="GET", payload=""):
         "neo-fin-key": "neotradeapi",
     }
 
+    params = {"sId": server_id} if with_sid and server_id else None
+
     # Construct full URL
     url = f"{base_url}{endpoint}"
 
     # Make request using httpx
-    response = client.request(method, url, headers=headers, content=payload if payload else None)
+    response = client.request(
+        method, url, headers=headers, params=params, content=payload if payload else None
+    )
 
     logger.info(f"ORDER API Response: {response.text}")
 
@@ -65,7 +86,8 @@ def get_positions(auth_token):
 
 
 def get_holdings(auth_token):
-    return get_api_response("/portfolio/v1/holdings", auth_token)
+    # Holdings must NOT receive the sId query param (Neo API v2 rejects/empties it).
+    return get_api_response("/portfolio/v1/holdings", auth_token, with_sid=False)
 
 
 # --- Per-Symbol Smart Order Lock ---
@@ -139,7 +161,7 @@ def get_open_position(tradingsymbol, exchange, producttype, auth_token):
 
 
 def place_order_api(data, auth_token):
-    session_token, session_sid, base_url, access_token = auth_token.split(":::")
+    session_token, session_sid, base_url, access_token, server_id = _parse_auth_token(auth_token)
 
     # Debug logging for baseUrl
     logger.info(f"PLACE ORDER API - Using baseUrl: {base_url}")
@@ -161,11 +183,13 @@ def place_order_api(data, auth_token):
         "Content-Type": "application/x-www-form-urlencoded",
     }
 
+    params = {"sId": server_id} if server_id else None
+
     # Construct full URL
     url = f"{base_url}/quick/order/rule/ms/place"
 
     try:
-        response = client.post(url, headers=headers, content=payload)
+        response = client.post(url, headers=headers, content=payload, params=params)
         logger.info(f"PLACE ORDER API Response: {response.status_code} {response.text}")
 
         # Add status attribute for compatibility with the existing codebase
@@ -335,7 +359,7 @@ def close_all_positions(current_api_key, auth_token):
 
 
 def cancel_order(orderid, auth_token):
-    session_token, session_sid, base_url, access_token = auth_token.split(":::")
+    session_token, session_sid, base_url, access_token, server_id = _parse_auth_token(auth_token)
 
     # Get the shared httpx client with connection pooling
     client = get_httpx_client()
@@ -350,11 +374,13 @@ def cancel_order(orderid, auth_token):
         "Content-Type": "application/x-www-form-urlencoded",
     }
 
+    params = {"sId": server_id} if server_id else None
+
     # Construct full URL
     url = f"{base_url}/quick/order/cancel"
 
     try:
-        response = client.post(url, headers=headers, content=payload)
+        response = client.post(url, headers=headers, content=payload, params=params)
         response_data = json.loads(response.text)
 
         if response_data.get("stat") == "Ok":
@@ -372,7 +398,7 @@ def cancel_order(orderid, auth_token):
 
 
 def modify_order(data, auth_token):
-    session_token, session_sid, base_url, access_token = auth_token.split(":::")
+    session_token, session_sid, base_url, access_token, server_id = _parse_auth_token(auth_token)
 
     # Debug logging for baseUrl
     logger.info(f"MODIFY ORDER API - Using baseUrl: {base_url}")
@@ -395,13 +421,15 @@ def modify_order(data, auth_token):
         "Content-Type": "application/x-www-form-urlencoded",
     }
 
+    params = {"sId": server_id} if server_id else None
+
     # Construct full URL
     url = f"{base_url}/quick/order/vr/modify"
 
     logger.info(f"MODIFY ORDER - Making POST request to: {url}")
 
     try:
-        response = client.post(url, headers=headers, content=payload)
+        response = client.post(url, headers=headers, content=payload, params=params)
 
         logger.info(f"MODIFY ORDER - Response status: {response.status_code}")
         logger.info(f"MODIFY ORDER - Response: {response.text}")
