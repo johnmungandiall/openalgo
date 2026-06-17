@@ -2,6 +2,35 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Knowledge Base (read FIRST — saves tokens)
+This repo has a compact KB in `kb/`. Before any task, read the relevant `kb/`
+files to orient instead of scanning the whole codebase.
+
+AUTO-MAINTAIN (mandatory): whenever you add, change, move, rename, or delete
+code/config in this repo, you MUST update the affected `kb/` note(s) in the
+SAME session, BEFORE ending your turn — treat it as part of "done", not
+optional. Touch only the notes whose underlying code changed; leave the rest.
+Edit the `kb/` FILES, not this CLAUDE.md — CLAUDE.md stays a stable pointer.
+Change the KB map below ONLY when you add or remove a `kb/` file, and then
+only that one line; routine code fixes must NOT modify CLAUDE.md.
+New major feature → add `kb/features/<name>.md`. Refresh the "last indexed"
+marker in `kb/overview.md`. Never let code and KB drift apart.
+
+SUB-AGENTS & SKILLS: the KB is the shared map for EVERY agent, not just this
+session. When you dispatch a sub-agent (Task/Agent) or run a skill/workflow
+that reads or edits code, pass the same rule in its instructions — read the
+relevant `kb/` notes FIRST to orient, and update them in the SAME session
+after changing code. A sub-agent starts cold, so it won't use the KB unless
+you tell it to.
+
+Map of the KB:
+- kb/overview.md — what OpenAlgo is, tech stack, entry point, how to run
+- kb/architecture.md — backend module map, request pipeline, startup, DBs, real-time channels
+- kb/subprojects/ — backend.md (Flask root), frontend.md (React 19 SPA)
+- kb/features/ — broker-integration, order-execution, websocket-streaming,
+  sandbox-analyzer, options-tools, strategy-hosts, api-layer, mcp
+- kb/conventions.md (patterns, constants, style), kb/glossary.md (domain terms)
+
 ## Overview
 
 OpenAlgo is a production-ready algorithmic trading platform built with Flask (backend) and React 19 (frontend). It is **four products in one self-hosted instance**, all sharing a single broker session and WebSocket feed:
